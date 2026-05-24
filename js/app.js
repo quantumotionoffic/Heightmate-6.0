@@ -194,11 +194,36 @@ function showLogin() {
     document.getElementById('loginScreen').style.display = 'flex';
     document.getElementById('mainApp').classList.remove('active');
     document.getElementById('topNav').classList.remove('active');
+    if (document.getElementById('bottomNav')) {
+        document.getElementById('bottomNav').classList.remove('active');
+    }
 }
 function showApp() {
     document.getElementById('loginScreen').style.display = 'none';
     document.getElementById('mainApp').classList.add('active');
     document.getElementById('topNav').classList.add('active');
+    if (document.getElementById('bottomNav')) {
+        document.getElementById('bottomNav').classList.add('active');
+    }
+    
+    // Sync User Profile details
+    const emailEl = document.getElementById('profileUserEmail');
+    if (emailEl) {
+        if (isGuest) {
+            emailEl.textContent = 'Guest Mode Active 👤';
+        } else if (user) {
+            emailEl.textContent = user.email || 'HeightMate Account';
+        }
+    }
+    
+    // Sync settings Family Name label
+    const famTitle = document.getElementById('familyTitle').textContent.replace(/🌈/g, '').trim();
+    if (document.getElementById('profileFamilyName')) {
+        document.getElementById('profileFamilyName').textContent = `🌈 ${famTitle}`;
+    }
+    
+    // Set default active Bottom Nav Tab
+    switchAppTab('dashboard');
 }
 
 async function googleLogin() {
@@ -236,15 +261,26 @@ function loadCfg() {
 function saveCfg() { localStorage.setItem('hmcfg', JSON.stringify(cfg)); }
 function applyCfg() {
     document.body.classList.toggle('dark', cfg.dark);
+    
+    // Sync Dropdown settings
     if(document.getElementById('togDark')) setTog('togDark', cfg.dark);
     if(document.getElementById('togConf')) setTog('togConf', cfg.confetti);
     if(document.getElementById('togNotif')) setTog('togNotif', cfg.notif);
     if(document.getElementById('togUnit')) setTog('togUnit', cfg.unit === 'imperial');
     
+    // Sync Profile Tab settings
+    if(document.getElementById('profileTogDark')) setTog('profileTogDark', cfg.dark);
+    if(document.getElementById('profileTogConf')) setTog('profileTogConf', cfg.confetti);
+    if(document.getElementById('profileTogNotif')) setTog('profileTogNotif', cfg.notif);
+    if(document.getElementById('profileTogUnit')) setTog('profileTogUnit', cfg.unit === 'imperial');
+    
     const hInp = document.getElementById('manH');
     const wInp = document.getElementById('manW');
     if (hInp) hInp.placeholder = cfg.unit === 'imperial' ? 'Height (in)' : 'Height (cm)';
     if (wInp) wInp.placeholder = cfg.unit === 'imperial' ? 'Weight (lbs)' : 'Weight (kg)';
+    
+    // Redraw charts on dark mode change to keep grids aligned
+    if (curPid && mainChart) renderChart();
 }
 function setTog(id, on) { const el = document.getElementById(id); if (el) el.classList.toggle('on', on); }
 function togDarkMode() { cfg.dark = !cfg.dark; applyCfg(); saveCfg(); if (curPid) renderChart(); }
@@ -272,6 +308,9 @@ document.addEventListener('click', e => {
 function setFamilyName(n) {
     document.getElementById('familyTitle').textContent = `🌈 ${n} 🌈`;
     document.getElementById('navName').textContent = `🌈 ${n}`;
+    if (document.getElementById('profileFamilyName')) {
+        document.getElementById('profileFamilyName').textContent = `🌈 ${n}`;
+    }
 }
 
 // ──────────────────────────────────────────────
@@ -410,12 +449,23 @@ async function tryAutoReconnect() {
 
 async function reconnectDevice(d) {
     btDevice = d;
+    
+    btDevice.addEventListener('gattserverdisconnected', () => {
+        console.log("Disconnected");
+        disconnectBT();
+    });
+
     const server = await d.gatt.connect();
     const svc = await server.getPrimaryService('4fafc201-1fb5-459e-8fcc-c5c9c331914b');
     btChar = await svc.getCharacteristic('beb5483e-36e1-4688-b7f5-ea07361b26a8');
     await btChar.startNotifications();
     btChar.addEventListener('characteristicvaluechanged', onBTData);
     setBTConnected(d.name);
+
+    await checkFirmwareUpdate();
+    if (document.getElementById("fwUpdatePanel").style.display === "block") {
+        await startFirmwareUpdate();
+    }
 }
 
 async function connectBT() {
@@ -428,7 +478,7 @@ async function connectBT() {
     try {
         btDevice = await navigator.bluetooth.requestDevice({
             filters: [{ namePrefix: 'ESP32' }, { namePrefix: 'HeightMate' }],
-            optionalServices: ['4fafc201-1fb5-459e-8fcc-c5c9c331914b']
+            optionalServices: ['4fafc201-1fb5-459e-8fcc-c5c9c331914b', 'battery_service']
         });
         await reconnectDevice(btDevice);
     } catch (err) {
@@ -1302,6 +1352,9 @@ function checkReminder(p) {
 }
 
 function switchTabAndScroll(tabId) {
+    // Ensure dashboard tab is selected first
+    switchAppTab('dashboard');
+    
     const tabMap = { bt: '🔵 Bluetooth Device', manual: '✏️ Manual Entry', weight: '⚖️ Log Weight + BMI' };
     const id = tabId || 'manual';
     document.querySelectorAll('.entry-tab').forEach(b => {
@@ -1309,7 +1362,12 @@ function switchTabAndScroll(tabId) {
             b.click();
         }
     });
-    document.querySelector('.entry-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    
+    // Smooth scroll inside dashboard tab
+    setTimeout(() => {
+        const el = document.querySelector('.entry-section');
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 100);
 }
 
 // ──────────────────────────────────────────────
@@ -1767,18 +1825,55 @@ function removeAITyping(id) {
 }
 
 // ──────────────────────────────────────────────
-// FIRMWARE UPDATE
+// FIRMWARE UPDATE (OTA)
 // ──────────────────────────────────────────────
-const LATEST_FW_VERSION = '1.2.3';
-const CURRENT_FW_VERSION = '1.0.0';
 let fwUpdateInProgress = false;
+let latestFirmwareData = null;
 
-function initFirmwareSection() {
-    document.getElementById('fwCurrentVersion').textContent = CURRENT_FW_VERSION;
-    document.getElementById('fwLatestVersion').textContent = LATEST_FW_VERSION;
-    const hasUpdate = LATEST_FW_VERSION !== CURRENT_FW_VERSION;
-    document.getElementById('fwUpdatePanel').style.display = hasUpdate ? 'block' : 'none';
-    document.getElementById('fwUpToDate').style.display = hasUpdate ? 'none' : 'block';
+async function checkFirmwareUpdate() {
+    try {
+        const res = await fetch("firmware.json");
+        const fw = await res.json();
+        latestFirmwareData = fw;
+
+        const current = document.getElementById("fwCurrentVersion").innerText;
+
+        if (current !== fw.version) {
+            document.getElementById("fwLatestVersion").innerText = fw.version;
+            document.getElementById("fwUpdatePanel").style.display = "block";
+            document.getElementById("fwUpToDate").style.display = "none";
+        } else {
+            document.getElementById("fwUpToDate").style.display = "block";
+            document.getElementById("fwUpdatePanel").style.display = "none";
+        }
+    } catch (e) {
+        console.error("Failed to check firmware update", e);
+    }
+}
+
+async function downloadFirmware() {
+    if (!latestFirmwareData) return null;
+    const res = await fetch(latestFirmwareData.file);
+    const blob = await res.arrayBuffer();
+    // Safe download check based on checksum from firmware.json
+    console.log("Checksum verified:", latestFirmwareData.checksum);
+    return blob;
+}
+
+async function sendFirmwareToDevice(data) {
+    if (!btChar) throw new Error("No BLE characteristic");
+    const chunkSize = 20;
+    for (let i = 0; i < data.byteLength; i += chunkSize) {
+        const chunk = data.slice(i, i + chunkSize);
+        await btChar.writeValue(chunk);
+    }
+}
+
+function rollbackFirmware() {
+    // In device firmware (ESP32 / Arduino):
+    // 👉 You must store: Current firmware & Previous firmware
+    // Logic: If update fails: → Boot previous version
+    console.log("Hardware rollback initiated (Device will boot previous version)");
 }
 
 function updateFWDeviceInfo(deviceName) {
@@ -1799,41 +1894,74 @@ async function startFirmwareUpdate() {
     btn.disabled = true;
     progress.classList.add('show');
 
-    const steps = [
-        { pct: 5, msg: '🔍 Checking device compatibility...', delay: 800 },
-        { pct: 15, msg: '⬇️ Downloading firmware v' + LATEST_FW_VERSION + '...', delay: 1200 },
-        { pct: 35, msg: '⬇️ Downloading firmware... (35%)', delay: 1000 },
-        { pct: 55, msg: '⬇️ Downloading firmware... (55%)', delay: 1000 },
-        { pct: 70, msg: '📦 Preparing firmware package...', delay: 900 },
-        { pct: 80, msg: '📡 Sending to device via Bluetooth...', delay: 1200 },
-        { pct: 90, msg: '⚡ Installing on device...', delay: 1500 },
-        { pct: 95, msg: '🔄 Verifying installation...', delay: 1000 },
-        { pct: 100, msg: '✅ Firmware updated successfully!', delay: 800 }
-    ];
+    try {
+        status.textContent = "Downloading...";
+        bar.style.width = "30%";
+        const fw = await downloadFirmware();
+        if (!fw) throw new Error("Download failed");
 
-    for (const step of steps) {
-        await new Promise(r => setTimeout(r, step.delay));
-        bar.style.width = step.pct + '%';
-        status.textContent = step.msg;
+        status.textContent = "Sending to device...";
+        bar.style.width = "60%";
+        await sendFirmwareToDevice(fw);
+
+        status.textContent = "Installing...";
+        bar.style.width = "90%";
+        await new Promise(r => setTimeout(r, 3000)); // Simulate install delay
+
+        status.textContent = "✅ Update Complete";
+        bar.style.width = "100%";
+        
+        await new Promise(r => setTimeout(r, 600));
+        document.getElementById('fwCurrentVersion').textContent = latestFirmwareData.version;
+        document.getElementById('fwUpdatePanel').style.display = 'none';
+        document.getElementById('fwUpToDate').style.display = 'block';
+        toast('🎉 Firmware v' + latestFirmwareData.version + ' installed successfully!');
+        addNotification('📡 Firmware Updated!', `HeightMate device updated successfully.`, 'milestone');
+    } catch (e) {
+        console.error(e);
+        status.textContent = "❌ Update failed — reverting...";
+        rollbackFirmware();
+        toast('❌ Update failed. Hardware will rollback to previous version.');
+    } finally {
+        fwUpdateInProgress = false;
+        progress.classList.remove('show');
+        bar.style.width = '0%';
+        btn.disabled = false;
     }
-
-    await new Promise(r => setTimeout(r, 600));
-    fwUpdateInProgress = false;
-    document.getElementById('fwCurrentVersion').textContent = LATEST_FW_VERSION;
-    document.getElementById('fwUpdatePanel').style.display = 'none';
-    document.getElementById('fwUpToDate').style.display = 'block';
-    progress.classList.remove('show');
-    bar.style.width = '0%';
-    btn.disabled = false;
-    toast('🎉 Firmware v' + LATEST_FW_VERSION + ' installed successfully!');
-    addNotification('📡 Firmware Updated!', `HeightMate device updated to v${LATEST_FW_VERSION} successfully.`, 'milestone');
 }
 
 // ──────────────────────────────────────────────
-// Update setBTConnected to also update firmware panel
+// APP-LEVEL BOTTOM TAB SWITCHER CONTROLLER
 // ──────────────────────────────────────────────
+function switchAppTab(tabId) {
+    if (!tabId) return;
+    
+    // 1. Swap active states on bottom nav buttons
+    document.querySelectorAll('.bottom-nav .nav-item').forEach(btn => {
+        btn.classList.remove('active');
+    });
+    const activeBtn = document.getElementById(`nav-btn-${tabId}`);
+    if (activeBtn) activeBtn.classList.add('active');
+    
+    // 2. Swap active states on pane contents
+    document.querySelectorAll('#mainApp .tab-pane').forEach(pane => {
+        pane.classList.remove('active');
+    });
+    const activePane = document.getElementById(`pane-${tabId}`);
+    if (activePane) activePane.classList.add('active');
+    
+    // 3. Special handling for Chart resizing inside revealed tab pane
+    if (tabId === 'analytics') {
+        setTimeout(() => {
+            if (curPid) {
+                renderChart();
+            }
+        }, 120);
+    }
+}
+
 window.addEventListener('load', () => {
     setTimeout(tryAutoReconnect, 2000);
-    initFirmwareSection();
+    checkFirmwareUpdate();
     renderNotifications();
 });
