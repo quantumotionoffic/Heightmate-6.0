@@ -53,6 +53,9 @@ function authErrMsg(code) {
         'auth/weak-password': 'Password is too weak!',
         'auth/user-not-found': 'No account found with this email!',
         'auth/wrong-password': 'Incorrect password!',
-        'auth/invalid-credential': 'Invalid email or password!'
+        'auth/invalid-credential': 'Invalid email or password!',
+        'auth/operation-not-supported-in-this-environment': 'Google Sign-In is not supported when running the app directly as a local file (file:// protocol). Please use Guest Login, or run the app on a local web server (like localhost) to sign in with Google!',
+        'auth/popup-blocked': 'Popup was blocked by your browser! Please allow popups for this site and try again.',
+        'auth/popup-closed-by-user': 'The sign-in popup was closed before completion. Please try again!'
     })[code] || 'An error occurred. Please try again!';
 }
